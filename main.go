@@ -22,10 +22,14 @@ var counter = 0
 var date = time.Now().Format("2006-01-02_15:04:05")
 
 func main() {
+	parseArgs(os.Args)
+
 	rotatorSettings := warc.NewRotatorSettings()
 
-	rotatorSettings.Encryption = "ZSTD"
-	rotatorSettings.OutputDirectory = "warcs"
+	rotatorSettings.Compression = arguments.Compression
+	rotatorSettings.OutputDirectory = arguments.OutputDirectory
+	rotatorSettings.Prefix = arguments.WARCPrefix
+	rotatorSettings.WarcSize = arguments.WARCSize
 
 	recordChannel, doneRecordChannel, err := rotatorSettings.NewWARCRotator()
 	if err != nil {
@@ -99,7 +103,7 @@ func main() {
 		})
 
 	srv := &http.Server{
-		Addr:    ":8080",
+		Addr:    arguments.Address,
 		Handler: proxy,
 	}
 
