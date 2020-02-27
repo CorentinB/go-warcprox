@@ -2,16 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"os"
 	"os/signal"
+	"regexp"
 	"syscall"
+	"time"
 
-	"github.com/AdguardTeam/gomitmproxy"
 	"github.com/CorentinB/warc"
+	"github.com/elazarl/goproxy"
 )
 
 func main() {
@@ -20,20 +22,21 @@ func main() {
 	rotatorSettings.Encryption = "ZSTD"
 	rotatorSettings.OutputDirectory = "warcs"
 
-	recordChannel, done, err := rotatorSettings.NewWARCRotator()
+	recordChannel, doneRecordChannel, err := rotatorSettings.NewWARCRotator()
 	if err != nil {
 		panic(err)
 	}
 
-	proxy := gomitmproxy.NewProxy(gomitmproxy.Config{
-		ListenAddr: &net.TCPAddr{
-			IP:   net.IPv4(0, 0, 0, 0),
-			Port: 8080,
-		},
-		OnResponse: func(session *gomitmproxy.Session) *http.Response {
+	proxy := goproxy.NewProxyHttpServer()
+	proxy.Verbose = true
+
+	proxy.OnRequest(goproxy.ReqHostMatches(regexp.MustCompile("^.*$"))).
+		HandleConnect(goproxy.AlwaysMitm)
+	proxy.OnResponse().DoFunc(
+		func(r *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
 			var batch = warc.NewRecordBatch()
-			var res = session.Response()
-			var req = session.Request()
+			var res = r
+			var req = r.Request
 
 			dumpRequest, err := httputil.DumpRequestOut(req, true)
 			if err != nil {
@@ -70,20 +73,37 @@ func main() {
 			recordChannel <- batch
 
 			return res
-		},
-	})
+		})
 
-	err = proxy.Start()
-	if err != nil {
-		log.Fatal(err)
+	srv := &http.Server{
+		Addr:    ":8080",
+		Handler: proxy,
 	}
 
-	signalChannel := make(chan os.Signal, 1)
-	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM)
-	<-signalChannel
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
-	// Clean up
-	proxy.Close()
-	close(recordChannel)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("listen: %s\n", err)
+		}
+	}()
+	log.Print("Server Started")
+
 	<-done
+	log.Print("Server Stopped")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer func() {
+		// extra handling here
+		cancel()
+	}()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatalf("Server Shutdown Failed:%+v", err)
+	}
+	log.Print("Server Exited Properly")
+
+	close(recordChannel)
+	<-doneRecordChannel
 }
