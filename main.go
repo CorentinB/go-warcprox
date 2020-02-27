@@ -3,18 +3,23 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/CorentinB/warc"
 	"github.com/elazarl/goproxy"
 )
+
+var counter = 0
+var date = time.Now().Format("2006-01-02_15:04:05")
 
 func main() {
 	rotatorSettings := warc.NewRotatorSettings()
@@ -28,34 +33,26 @@ func main() {
 	}
 
 	proxy := goproxy.NewProxyHttpServer()
-	proxy.Verbose = true
 
 	proxy.OnRequest(goproxy.ReqHostMatches(regexp.MustCompile("^.*$"))).
 		HandleConnect(goproxy.AlwaysMitm)
-	proxy.OnResponse().DoFunc(
-		func(r *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
+	proxy.OnRequest().DoFunc(
+		func(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+			if time.Now().Format("2006-01-02_15:04:05") != date {
+				date = time.Now().Format("2006-01-02_15:04:05")
+				fmt.Println(strconv.Itoa(counter) + "req/s")
+				counter = 0
+			} else {
+				counter++
+			}
+
 			var batch = warc.NewRecordBatch()
-			var res = r
-			var req = r.Request
+			var req = r
 
-			dumpRequest, err := httputil.DumpRequestOut(req, true)
+			dumpRequest, err := httputil.DumpRequest(req, true)
 			if err != nil {
 				panic(err)
 			}
-
-			dumpResponse, err := httputil.DumpResponse(res, true)
-			if err != nil {
-				panic(err)
-			}
-
-			// Add the response to the exchange
-			var responseRecord = warc.NewRecord()
-			responseRecord.Header.Set("WARC-Type", "response")
-			responseRecord.Header.Set("WARC-Payload-Digest", "sha1:"+warc.GetSHA1(dumpResponse))
-			responseRecord.Header.Set("WARC-Target-URI", req.URL.String())
-			responseRecord.Header.Set("Content-Type", "application/http; msgtype=response")
-
-			responseRecord.Content = bytes.NewReader(dumpResponse)
 
 			// Add the request to the exchange
 			var requestRecord = warc.NewRecord()
@@ -67,8 +64,34 @@ func main() {
 
 			requestRecord.Content = bytes.NewReader(dumpRequest)
 
+			// Append record to the record batch
+			batch.Records = append(batch.Records, requestRecord)
+
+			recordChannel <- batch
+
+			return r, nil
+		})
+	proxy.OnResponse().DoFunc(
+		func(r *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
+			var batch = warc.NewRecordBatch()
+			var res = r
+
+			dumpResponse, err := httputil.DumpResponse(res, true)
+			if err != nil {
+				panic(err)
+			}
+
+			// Add the response to the exchange
+			var responseRecord = warc.NewRecord()
+			responseRecord.Header.Set("WARC-Type", "response")
+			responseRecord.Header.Set("WARC-Payload-Digest", "sha1:"+warc.GetSHA1(dumpResponse))
+			responseRecord.Header.Set("WARC-Target-URI", res.Request.URL.String())
+			responseRecord.Header.Set("Content-Type", "application/http; msgtype=response")
+
+			responseRecord.Content = bytes.NewReader(dumpResponse)
+
 			// Append records to the record batch
-			batch.Records = append(batch.Records, responseRecord, requestRecord)
+			batch.Records = append(batch.Records, responseRecord)
 
 			recordChannel <- batch
 
